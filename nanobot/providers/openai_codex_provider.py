@@ -11,7 +11,6 @@ import re
 import ssl
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
-from uuid import uuid4
 
 import httpx
 from loguru import logger
@@ -20,7 +19,7 @@ from oauth_cli_kit.providers import OPENAI_CODEX_PROVIDER
 from oauth_cli_kit.storage import FileTokenStorage
 
 from nanobot import __version__
-from nanobot.events import NO_EVENTS, ContextCompactionEvent
+from nanobot.events import NO_EVENTS
 from nanobot.providers.base import (
     CONTEXT_SAFETY_BUFFER,
     LLMProvider,
@@ -29,6 +28,7 @@ from nanobot.providers.base import (
     ProviderCallContext,
     ProviderConversationState,
 )
+from nanobot.providers.compaction import provider_compaction_scope
 from nanobot.providers.images import prepare_inline_images
 from nanobot.providers.oauth_catalog_cache import (
     OAuthCatalogAuthRequiredError,
@@ -41,13 +41,16 @@ from nanobot.providers.openai_responses import (
     ResponsesWebSocketOptions,
     responses_state_matches,
 )
+from nanobot.providers.openai_responses.errors import (
+    COMPACTION_FEATURES,
+    is_unsupported_feature_error,
+)
 from nanobot.providers.openai_responses.state import (
     responses_compaction_items,
     without_response_item_ids,
 )
 from nanobot.providers.openai_responses.websocket import ResponsesWebSocketError
 from nanobot.providers.registry import ProviderModelSpec, find_by_name
-from nanobot.utils.cancellation import shield_and_drain
 from nanobot.utils.helpers import estimate_prompt_tokens
 
 DEFAULT_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
@@ -361,37 +364,31 @@ class OpenAICodexProvider(LLMProvider):
             if self.supports_native_compaction(model) and replayed and sanitized_state is not None:
                 stage = "codex_compaction"
 
-                async def send_compaction(request: dict[str, Any]) -> LLMResponse:
-                    nonlocal native_compaction_event_id
-                    compaction_id = uuid4().hex
-                    try:
-                        await events.emit(ContextCompactionEvent(compaction_id, "started", reason="provider_native"))
+                async with provider_compaction_scope(
+                    events, provider_context.compaction if provider_context else None,
+                ) as compaction:
+                    async def send_compaction(request: dict[str, Any]) -> LLMResponse:
+                        nonlocal native_compaction_event_id
+                        compaction_id = await compaction.start("provider_native")
                         compacted = await _send(
                             request,
                             emit_deltas=False,
                             trace_name="codex_compaction",
                             validate=responses_compaction_items,
                         )
-                    except (Exception, asyncio.CancelledError) as exc:
-                        await shield_and_drain(events.emit(ContextCompactionEvent(
-                            compaction_id,
-                            "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
-                            reason="provider_native",
-                        )))
-                        raise
-                    native_compaction_event_id = compaction_id
-                    await shield_and_drain(events.emit(ContextCompactionEvent(compaction_id, "succeeded", reason="provider_native")))
-                    return compacted
+                        native_compaction_event_id = compaction_id
+                        await compaction.finish("succeeded")
+                        return compacted
 
-                native_compaction_state = await self._responses.compact_before_request(
-                    body, state=sanitized_state,
-                    provider=self._responses_state_provider(), model=_strip_model_prefix(model),
-                    context_window_tokens=(
-                        provider_context.context_window_tokens if provider_context else None
-                    ),
-                    max_output_tokens=max_tokens, input_budget=input_budget,
-                    send=send_compaction,
-                )
+                    native_compaction_state = await self._responses.compact_before_request(
+                        body, state=sanitized_state,
+                        provider=self._responses_state_provider(), model=_strip_model_prefix(model),
+                        context_window_tokens=(
+                            provider_context.context_window_tokens if provider_context else None
+                        ),
+                        max_output_tokens=max_tokens, input_budget=input_budget,
+                        send=send_compaction,
+                    )
 
             if input_budget is not None:
                 estimated = estimate_prompt_tokens([{
@@ -620,10 +617,7 @@ def _build_codex_http_error(status_code: int, headers: httpx.Headers, raw: str) 
     retry_after = LLMProvider._extract_retry_after_from_headers(headers)
     error_type, error_code = LLMProvider._extract_error_type_code(raw)
     error_param, error_message = _codex_error_details(raw)
-    compaction_unsupported = status_code in {400, 404, 422} and any(
-        marker in raw.lower()
-        for marker in ("context_management", "compact_threshold", "compaction_trigger")
-    )
+    compaction_unsupported = is_unsupported_feature_error(status_code, raw, COMPACTION_FEATURES)
     return _CodexHTTPError(
         _friendly_error(status_code), status_code=status_code,
         retry_after=retry_after, error_type=error_type, error_code=error_code,
