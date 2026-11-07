@@ -4088,6 +4088,13 @@ describe("App layout", () => {
       .toEqual(["Alpha"]);
     expect(screen.queryByRole("button", { name: "Layout" }))
       .not.toBeInTheDocument();
+    const alphaInput = screen.getByRole("textbox", { name: "Message Alpha" });
+    expect(screen.getByTestId("workbench-pane-websocket:chat-alpha")).toContainElement(alphaInput);
+    fireEvent.change(alphaInput, { target: { value: "keep this Alpha draft" } });
+    fireEvent.change(alphaInput.closest(".thread-composer-surface")!.querySelector('input[type="file"]')!, {
+      target: { files: [new File(["notes"], "alpha-notes.txt", { type: "text/plain" })] },
+    });
+    expect(within(await screen.findByTestId("composer-chip")).getByRole("button", { name: "alpha-notes.txt" })).toBeVisible();
 
     fireEvent.click(screen.getByRole("button", { name: "Add pane" }));
     expect(screen.queryByRole("dialog", { name: "Search" })).not.toBeInTheDocument();
@@ -4163,6 +4170,11 @@ describe("App layout", () => {
       name: "Remove",
     }));
     await waitFor(() => expect(screen.getByTestId("pane-grid").children).toHaveLength(1));
+    fireEvent.click(within(sidebar).getByRole("button", { name: "Alpha" }));
+    const restoredInput = await screen.findByRole("textbox", { name: "Message Alpha" });
+    expect(screen.getByTestId("workbench-pane-websocket:chat-alpha")).toContainElement(restoredInput);
+    expect(restoredInput).toHaveValue("keep this Alpha draft");
+    expect(within(await screen.findByTestId("composer-chip")).getByRole("button", { name: "alpha-notes.txt" })).toBeVisible();
     const researchGroup = within(sidebar).getByRole("button", {
       name: "Group: Research",
     }).closest("[data-sidebar-tab-group]") as HTMLElement;
@@ -4659,6 +4671,25 @@ describe("App layout", () => {
     expect(within(popup).getByRole("textbox", { name: "Pairing code" })).toBeEnabled();
     expect(within(popup).queryByRole("alert")).not.toBeInTheDocument();
     expect(within(popup).getByText("2 pending")).toBeVisible();
+  });
+
+  it("shows a dismissed pairing request again when its snooze expires", async () => {
+    vi.useFakeTimers();
+    mockFetchRoutes({ "/api/settings/pairing": { requests: [{
+      code: "ABCD-EFGH", channel: "feishu", sender_id: "alice", delivery_status: "sent",
+    }] } });
+    render(<App />);
+    await act(async () => {});
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Pair account" }))
+      .getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog", { name: "Pair account" })).not.toBeInTheDocument();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
+    expect(screen.queryByRole("dialog", { name: "Pair account" })).not.toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    const popup = screen.getByRole("dialog", { name: "Pair account" });
+    expect(popup).toBeVisible();
+    expect(within(popup).getByRole("textbox", { name: "Pairing code" })).toBeEnabled();
   });
 
   it("shows a recovered pairing reply even after its failure notice was dismissed", async () => {

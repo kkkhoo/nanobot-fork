@@ -55,6 +55,7 @@ from nanobot.utils.evaluator import evaluate_response, resolve_evaluator_prompt
 from nanobot.utils.helpers import sync_workspace_templates
 from nanobot.utils.token_encoding import warmup_token_encoding
 from nanobot.webui.build import BuildMode
+from nanobot.webui.context_source_hook import create_context_source_hook
 from nanobot.webui.dev import WebUIDevError, WebUIDevServer
 from nanobot.webui.sidebar_state import ensure_webui_session_archives
 
@@ -593,6 +594,8 @@ def _run_claimed_gateway(
         unified_session=config.agents.defaults.unified_session,
     )
 
+    from nanobot.goal.assembly import install_goal
+
     agent = AgentLoop.from_config(
         config, bus,
         provider=provider_snapshot.provider,
@@ -606,10 +609,12 @@ def _run_claimed_gateway(
         provider_signature=provider_snapshot.signature,
         local_trigger_store=trigger_store,
         hooks=[_MCPReadinessHook(mcp_provider)],
-        hook_factories=[create_file_edit_activity_hook],
+        hook_factories=[create_file_edit_activity_hook, create_context_source_hook],
         tool_registry=tools,
         recovery_admission=recovery,
+        builtin_assembly=install_goal,
     )
+
     def _schedule_webui_background(awaitable: Awaitable[None]) -> None:
         agent.schedule_background(cast(Coroutine[Any, Any, None], awaitable))
 
